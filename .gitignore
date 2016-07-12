@@ -1,0 +1,3 @@
+*.o
+dh2
+samples.h
