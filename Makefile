@@ -1,15 +1,27 @@
 CFLAGS = -O2
 
+LDFLAGS =
+
+ifeq ($(FFTW),1)
+	CFLAGS += -DUSE_FFTW
+endif
+
 DH2_OBJS = dh2.o
 
 ST_OBJS = sample_trim.o
 
-CONV_OBJS = simple_convolver.o kissfft/kiss_fft.o kissfft/kiss_fftr.o 
+CONV_OBJS = simple_convolver.o
+
+ifeq ($(FFTW),1)
+LDFLAGS += -lfftw3f
+else
+CONV_OBJS += kissfft/kiss_fft.o kissfft/kiss_fftr.o
+endif
 
 all: dh2
 
 dh2 : $(DH2_OBJS) $(CONV_OBJS)
-	$(CC) -o $@ $^
+	$(CC) -o $@ $^ $(LDFLAGS)
 
 samples.h : sample_trim
 	./sample_trim > samples.h

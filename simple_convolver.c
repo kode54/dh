@@ -40,7 +40,11 @@
 
 /* Here comes the magic import header! */
 
+#ifdef USE_FFTW
+#include <fftw3.h>
+#else
 #include "kissfft/kiss_fftr.h"
+#endif
 
 /* Only the simplest of state information is necessary for this, and it's
  * designed around a simple usage case. As many samples as you can generate,
@@ -55,8 +59,13 @@ typedef struct convolver_state
 	int inputs;                             /* Input channels */
 	int outputs;                            /* Output channels */
     int mode;                               /* Mode */
+#ifdef USE_FFTW
+    fftwf_plan *p_fw, p_bw;                 /* forward and backwards plans */
+    fftwf_complex *f_in, *f_out, **f_ir;    /* input, output, and impulse in frequency domain */
+#else
 	kiss_fftr_cfg cfg_fw, cfg_bw;           /* forward and backwards instances */
-	kiss_fft_cpx *f_in, *f_out, **f_ir;     /* output and impulse in frequency domain */
+	kiss_fft_cpx *f_in, *f_out, **f_ir;     /* input, output, and impulse in frequency domain */
+#endif
 	float *revspace, **outspace, **inspace; /* reverse, output, and input work space */
 } convolver_state;
 
@@ -153,43 +162,90 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
     /* Prepare arrays for multiple inputs */
     /* And we use kissfft's aligned malloc functions/macros to allocate these things. */
  
+#ifdef USE_FFTW
+    if ( (state->f_in = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (fftlen/2+1))) == NULL )
+#else
 	if ( (state->f_in = (kiss_fft_cpx*) KISS_FFT_MALLOC(sizeof(kiss_fft_cpx) * (fftlen/2+1))) == NULL )
+#endif
 		goto error;
 
+#ifdef USE_FFTW
+    if ( (state->f_out = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (fftlen/2+1))) == NULL )
+#else
 	if ( (state->f_out = (kiss_fft_cpx*) KISS_FFT_MALLOC(sizeof(kiss_fft_cpx) * (fftlen/2+1))) == NULL )
+#endif
 		goto error;
 
+#ifdef USE_FFTW
+    if ( (state->f_ir = (fftwf_complex**) calloc(sizeof(fftwf_complex*), total_channels)) == NULL )
+#else
 	if ( (state->f_ir = (kiss_fft_cpx**) calloc(sizeof(kiss_fft_cpx*), total_channels)) == NULL )
+#endif
 		goto error;
 	for (i = 0; i < total_channels; ++i)
 	{
+#ifdef USE_FFTW
+        if ( (state->f_ir[i] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (fftlen/2+1))) == NULL )
+#else
 		if ( (state->f_ir[i] = (kiss_fft_cpx*) KISS_FFT_MALLOC(sizeof(kiss_fft_cpx) * (fftlen/2+1))) == NULL )
+#endif
 			goto error;
 	}
 
+#ifdef USE_FFTW
+    if ( (state->revspace = (float *) fftwf_malloc(sizeof(float) * fftlen)) == NULL )
+#else
 	if ( (state->revspace = (float *) KISS_FFT_MALLOC(sizeof(float) * fftlen)) == NULL )
+#endif
 		goto error;
 
 	if ( (state->outspace = (float **) calloc(sizeof(float *), output_channels)) == NULL )
 		goto error;
 	for (i = 0; i < output_channels; ++i)
 	{
+#ifdef USE_FFTW
+        if ( (state->outspace[i] = (float *) fftwf_malloc(sizeof(float) * fftlen)) == NULL )
+#else
 		if ( (state->outspace[i] = (float *) calloc(sizeof(float), fftlen)) == NULL )
+#endif
 			goto error;
+#ifdef USE_FFTW
+        memset( state->outspace[i], 0, sizeof(float) * fftlen );
+#endif
 	}
 
 	if ( (state->inspace = (float **) calloc(sizeof(float *), input_channels)) == NULL )
 		goto error;
 	for (i = 0; i < input_channels; ++i)
 	{
+#ifdef USE_FFTW
+        if ( (state->inspace[i] = (float *) fftwf_malloc(sizeof(float) * fftlen)) == NULL )
+#else
 		if ( (state->inspace[i] = (float *) calloc(sizeof(float), fftlen)) == NULL )
+#endif
 			goto error;
+#ifdef USE_FFTW
+        memset( state->inspace[i], 0, sizeof(float) * fftlen );
+#endif
 	}
 
+#ifdef USE_FFTW
+    if ( (state->p_fw = (fftwf_plan *) calloc(sizeof(fftwf_plan), input_channels)) == NULL )
+        goto error;
+
+    for (i = 0; i < input_channels; ++i)
+    {
+        if ( (state->p_fw[i] = fftwf_plan_dft_r2c_1d(fftlen, state->inspace[i], state->f_in, FFTW_ESTIMATE)) == NULL )
+            goto error;
+    }
+    if ( (state->p_bw = fftwf_plan_dft_c2r_1d(fftlen, state->f_out, state->revspace, FFTW_ESTIMATE)) == NULL )
+        goto error;
+#else
 	if ( (state->cfg_fw = kiss_fftr_alloc( fftlen, 0, NULL, NULL )) == NULL )
 		goto error;
 	if ( (state->cfg_bw = kiss_fftr_alloc( fftlen, 1, NULL, NULL )) == NULL )
 		goto error;
+#endif
 
 	convolver_restage( state, impulse );
 
@@ -205,6 +261,9 @@ void convolver_restage( void * state_, const float * const * impulse )
 {
 	convolver_state * state = (convolver_state *) state_;
 
+#ifdef USE_FFTW
+#endif
+
 	float * impulse_temp;
 
 	int impulse_count;
@@ -213,8 +272,13 @@ void convolver_restage( void * state_, const float * const * impulse )
 	int impulse_size = fftlen - state->stepsize - 10;
 	int i, j, k;
 
+#ifdef USE_FFTW
+    fftwf_plan p;
+    fftwf_complex ** f_ir = state->f_ir;
+#else
 	kiss_fftr_cfg cfg_fw = state->cfg_fw;
 	kiss_fft_cpx ** f_ir = state->f_ir;
+#endif
 
     if ( state->mode == 0 || state->mode == 1 )
         impulse_count = 1;
@@ -244,8 +308,16 @@ void convolver_restage( void * state_, const float * const * impulse )
 			}
 
     /* Our first actual transformation, which is cached for the life of this convolver. */
-    
+#ifdef USE_FFTW
+            p = fftwf_plan_dft_r2c_1d(fftlen, impulse_temp, f_ir[i * channels_per_impulse + j], FFTW_ESTIMATE);
+            if (p)
+            {
+                fftwf_execute(p);
+                fftwf_destroy_plan(p);
+            }
+#else
 			kiss_fftr( cfg_fw, impulse_temp, f_ir[i * channels_per_impulse + j] );
+#endif
 		}
 	}
 
@@ -269,31 +341,65 @@ void convolver_delete( void * state_ )
             total_channels = input_channels;
         else if ( state->mode == 2 )
 		    total_channels = input_channels * output_channels;
+#ifdef USE_FFTW
+        if ( state->p_fw )
+        {
+            for (i = 0; i < input_channels; ++i)
+            {
+                if (state->p_fw[i])
+                    fftwf_destroy_plan(state->p_fw[i]);
+            }
+            free(state->p_fw);
+        }
+        if ( state->p_bw )
+            fftwf_destroy_plan( state->p_bw );
+#else
 		if ( state->cfg_fw )
 			kiss_fftr_free( state->cfg_fw );
 		if ( state->cfg_bw )
 			kiss_fftr_free( state->cfg_bw );
+#endif
 		if ( state->f_ir )
 		{
 			for (i = 0; i < total_channels; ++i)
 			{
 				if ( state->f_ir[i] )
+#ifdef USE_FFTW
+                    fftwf_free( state->f_ir[i] );
+#else
 					KISS_FFT_FREE( state->f_ir[i] );
+#endif
 			}
 			free( state->f_ir );
 		}
 		if ( state->f_out )
+#ifdef USE_FFTW
+            fftwf_free( state->f_out );
+#else
 			KISS_FFT_FREE( state->f_out );
+#endif
 		if ( state->f_in )
+#ifdef USE_FFTW
+            fftwf_free( state->f_out );
+#else
 			KISS_FFT_FREE( state->f_in );
+#endif
 		if ( state->revspace )
+#ifdef USE_FFTW
+            fftwf_free( state->revspace );
+#else
 			KISS_FFT_FREE( state->revspace );
+#endif
 		if ( state->outspace )
 		{
 			for (i = 0; i < output_channels; ++i)
 			{
 				if ( state->outspace[i] )
+#ifdef USE_FFTW
+                    fftwf_free( state->outspace[i] );
+#else
 					free( state->outspace[i] );
+#endif
 			}
 			free( state->outspace );
 		}
@@ -302,7 +408,11 @@ void convolver_delete( void * state_ )
 			for (i = 0; i < input_channels; ++i)
 			{
 				if ( state->inspace[i] )
+#ifdef USE_FFTW
+                    fftwf_free( state->inspace[i] );
+#else
 					free( state->inspace[i] );
+#endif
 			}
 			free( state->inspace );
 		}
@@ -381,29 +491,53 @@ void convolver_write(void * state_, const float * input_samples)
 			int fftlen;
 			int index;
 			float fftlen_if;
+#ifdef USE_FFTW
+            fftwf_complex *f_in = state->f_in;
+            fftwf_complex *f_out = state->f_out;
+#else
 			kiss_fft_cpx *f_in = state->f_in;
 			kiss_fft_cpx *f_out = state->f_out;
+#endif
 			float *revspace = state->revspace;
 
             if ( state->mode == 0 || state->mode == 1 )
             {
                 for ( i = 0; i < input_channels; ++i )
                 {
-				    int index = i * state->mode; 
+				    int index = i * state->mode;
+#ifdef USE_FFTW
+                    fftwf_complex *f_ir = state->f_ir[index];
+#else
     				kiss_fft_cpx *f_ir = state->f_ir[index];
+#endif
 	    			float *outspace;
 
+#ifdef USE_FFTW
+                    fftwf_execute( state->p_fw[i] );
+#else
                     kiss_fftr( state->cfg_fw, state->inspace[i], f_in );
+#endif
 
 		    		for ( k = 0, fftlen = state->fftlen / 2 + 1; k < fftlen; ++k )
 					{
+#ifdef USE_FFTW
+                        float re = f_ir[k][0] * f_in[k][0] - f_ir[k][1] * f_in[k][1];
+                        float im = f_ir[k][1] * f_in[k][0] + f_ir[k][0] * f_in[k][1];
+                        f_out[k][0] = re;
+                        f_out[k][1] = im;
+#else
 			    		float re = f_ir[k].r * f_in[k].r - f_ir[k].i * f_in[k].i;
 				    	float im = f_ir[k].i * f_in[k].r + f_ir[k].r * f_in[k].i;
 					    f_out[k].r = re;
   						f_out[k].i = im;
+#endif
 	  				}
 
+#ifdef USE_FFTW
+                    fftwf_execute( state->p_bw );
+#else
                     kiss_fftri( state->cfg_bw, f_out, revspace );
+#endif
 
 		    		outspace = state->outspace[i];
 			    	for (j = 0, fftlen = state->fftlen, fftlen_if = 1.0f / (float)fftlen; j < fftlen; ++j)
@@ -417,28 +551,47 @@ void convolver_write(void * state_, const float * input_samples)
             /* First the input samples are transformed to frequency domain, like
              * the cached impulse was in the setup function. */
              
+#ifdef USE_FFTW
+                    fftwf_execute( state->p_fw[i] );
+#else
 		    		kiss_fftr( state->cfg_fw, state->inspace[i], f_in );
+#endif
 
 			    	for ( j = 0; j < output_channels; ++j )
 				    {
             /* Then we cross multiply the products of the frequency domain, the
              * real and imaginary values, into output real and imaginary pairs. */
  
-					    int index = i * output_channels + j; 
+					    int index = i * output_channels + j;
+#ifdef USE_FFTW
+                        fftwf_complex *f_ir = state->f_ir[index];
+#else
     					kiss_fft_cpx *f_ir = state->f_ir[index];
+#endif
 	    				float *outspace;
 
 		    			for ( k = 0, fftlen = state->fftlen / 2 + 1; k < fftlen; ++k )
 			    		{
+#ifdef USE_FFTW
+                            float re = f_ir[k][0] * f_in[k][0] - f_ir[k][1] * f_in[k][1];
+                            float im = f_ir[k][1] * f_in[k][0] + f_ir[k][0] * f_in[k][1];
+                            f_out[k][0] = re;
+                            f_out[k][1] = im;
+#else
 				    		float re = f_ir[k].r * f_in[k].r - f_ir[k].i * f_in[k].i;
 					    	float im = f_ir[k].i * f_in[k].r + f_ir[k].r * f_in[k].i;
 						    f_out[k].r = re;
     						f_out[k].i = im;
+#endif
 	    				}
 
             /* Then we transform back from frequency to time domain. */
-            
+
+#ifdef USE_FFTW
+                        fftwf_execute( state->p_bw );
+#else
 		    			kiss_fftri( state->cfg_bw, f_out, revspace );
+#endif
 
             /* Then we add the entire revspace block onto our output, dividing
              * each value by the total number of samples in the buffer. Remember,
