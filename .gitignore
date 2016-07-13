@@ -1,3 +1,4 @@
 *.o
 dh2
+sample_trim
 samples.h
