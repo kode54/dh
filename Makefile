@@ -2,6 +2,10 @@ CFLAGS = -O2
 
 LDFLAGS =
 
+ifeq "$(PLATFORM)" ""
+PLATFORM := $(shell uname)
+endif
+
 ifeq ($(FFTW),1)
 	CFLAGS += -DUSE_FFTW
 endif
@@ -15,7 +19,13 @@ CONV_OBJS = simple_convolver.o
 ifeq ($(FFTW),1)
 LDFLAGS += -lfftw3f
 else
+ifneq ("$(PLATFORM)","Darwin")
 CONV_OBJS += kissfft/kiss_fft.o kissfft/kiss_fftr.o
+endif
+endif
+
+ifeq ("$(PLATFORM)","Darwin")
+LDFLAGS += -framework Accelerate
 endif
 
 all: dh2

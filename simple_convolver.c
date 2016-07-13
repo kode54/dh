@@ -42,8 +42,28 @@
 
 #ifdef USE_FFTW
 #include <fftw3.h>
+#elif defined(__APPLE__)
+#include <Accelerate/Accelerate.h>
+#include <malloc/malloc.h>
 #else
 #include "kissfft/kiss_fftr.h"
+#endif
+
+#if !defined(USE_FFTW) && defined(__APPLE__)
+static inline int _malloc_dspsplitcomplex(DSPSplitComplex *out, size_t fftlen)
+{
+    fftlen = (fftlen/2)+1;
+    out->realp = _mm_malloc(sizeof(float) * fftlen, 16);
+    out->imagp = _mm_malloc(sizeof(float) * fftlen, 16);
+    if (out->realp == NULL || out->imagp == NULL) return -1;
+    return 0;
+}
+
+static inline void _free_dspsplitcomplex(DSPSplitComplex *cpx)
+{
+    if (cpx->realp) _mm_free(cpx->realp);
+    if (cpx->imagp) _mm_free(cpx->imagp);
+}
 #endif
 
 /* Only the simplest of state information is necessary for this, and it's
@@ -53,6 +73,9 @@
 typedef struct convolver_state
 {
 	int fftlen;                             /* size of FFT */
+#if !defined(USE_FFTW) && defined(__APPLE__)
+    int fftlenlog2;                         /* log2 of FFT size */
+#endif
 	int stepsize;                           /* size of overlapping steps */
 	int buffered_in;                        /* how many input samples buffered */
 	int buffered_out;                       /* output samples buffered */
@@ -62,6 +85,9 @@ typedef struct convolver_state
 #ifdef USE_FFTW
     fftwf_plan *p_fw, p_bw;                 /* forward and backwards plans */
     fftwf_complex *f_in, *f_out, **f_ir;    /* input, output, and impulse in frequency domain */
+#elif defined(__APPLE__)
+    FFTSetup setup;                         /* setup */
+    DSPSplitComplex f_in, f_out, *f_ir;     /* input, output, and impulse in frequency domain */
 #else
 	kiss_fftr_cfg cfg_fw, cfg_bw;           /* forward and backwards instances */
 	kiss_fft_cpx *f_in, *f_out, **f_ir;     /* input, output, and impulse in frequency domain */
@@ -101,13 +127,16 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
     else if ( mode == 2 )
 	    total_channels = input_channels * output_channels;
 
-#ifdef USE_FFTW
+#if defined(USE_FFTW) || defined(__APPLE__)
     fftlen = ( impulse_size * 11 ) / 8;
 	{
 		// round up to a power of two
 		int pow = 1;
 		while ( fftlen > 2 ) { pow++; fftlen /= 2; }
 		fftlen = 2 << pow;
+#ifndef USE_FFTW
+        state->fftlenlog2 = pow + 1;
+#endif
 	}
 #else
     /* This is bog standard, from the example code I lifted. Mainly needs this
@@ -165,7 +194,11 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 #endif
 
 	state->fftlen = fftlen;
+#if defined(USE_FFTW) || defined(__APPLE__)
+    state->stepsize = fftlen - impulse_size;
+#else
 	state->stepsize = fftlen - impulse_size - 10;
+#endif
 	state->buffered_in = 0;
 	state->buffered_out = 0;
 
@@ -174,6 +207,8 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
  
 #ifdef USE_FFTW
     if ( (state->f_in = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (fftlen/2+1))) == NULL )
+#elif defined(__APPLE__)
+    if ( _malloc_dspsplitcomplex(&state->f_in, fftlen) < 0 )
 #else
 	if ( (state->f_in = (kiss_fft_cpx*) KISS_FFT_MALLOC(sizeof(kiss_fft_cpx) * (fftlen/2+1))) == NULL )
 #endif
@@ -181,6 +216,8 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 
 #ifdef USE_FFTW
     if ( (state->f_out = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (fftlen/2+1))) == NULL )
+#elif defined(__APPLE__)
+    if ( _malloc_dspsplitcomplex(&state->f_out, fftlen) < 0 )
 #else
 	if ( (state->f_out = (kiss_fft_cpx*) KISS_FFT_MALLOC(sizeof(kiss_fft_cpx) * (fftlen/2+1))) == NULL )
 #endif
@@ -188,6 +225,8 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 
 #ifdef USE_FFTW
     if ( (state->f_ir = (fftwf_complex**) calloc(sizeof(fftwf_complex*), total_channels)) == NULL )
+#elif defined(__APPLE__)
+    if ( (state->f_ir = (DSPSplitComplex*) calloc(sizeof(DSPSplitComplex), total_channels)) == NULL )
 #else
 	if ( (state->f_ir = (kiss_fft_cpx**) calloc(sizeof(kiss_fft_cpx*), total_channels)) == NULL )
 #endif
@@ -196,6 +235,8 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 	{
 #ifdef USE_FFTW
         if ( (state->f_ir[i] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (fftlen/2+1))) == NULL )
+#elif defined(__APPLE__)
+        if ( _malloc_dspsplitcomplex(&state->f_ir[i], fftlen) < 0 )
 #else
 		if ( (state->f_ir[i] = (kiss_fft_cpx*) KISS_FFT_MALLOC(sizeof(kiss_fft_cpx) * (fftlen/2+1))) == NULL )
 #endif
@@ -204,6 +245,8 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 
 #ifdef USE_FFTW
     if ( (state->revspace = (float *) fftwf_malloc(sizeof(float) * fftlen)) == NULL )
+#elif defined(__APPLE__)
+    if ( (state->revspace = (float *) _mm_malloc(sizeof(float) * fftlen, 16)) == NULL )
 #else
 	if ( (state->revspace = (float *) KISS_FFT_MALLOC(sizeof(float) * fftlen)) == NULL )
 #endif
@@ -215,11 +258,13 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 	{
 #ifdef USE_FFTW
         if ( (state->outspace[i] = (float *) fftwf_malloc(sizeof(float) * fftlen)) == NULL )
+#elif defined(__APPLE__)
+        if ( (state->outspace[i] = (float *) _mm_malloc(sizeof(float) * fftlen, 16)) == NULL )
 #else
 		if ( (state->outspace[i] = (float *) calloc(sizeof(float), fftlen)) == NULL )
 #endif
 			goto error;
-#ifdef USE_FFTW
+#if defined(USE_FFTW) || defined(__APPLE__)
         memset( state->outspace[i], 0, sizeof(float) * fftlen );
 #endif
 	}
@@ -230,11 +275,13 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 	{
 #ifdef USE_FFTW
         if ( (state->inspace[i] = (float *) fftwf_malloc(sizeof(float) * fftlen)) == NULL )
+#elif defined(__APPLE__)
+        if ( (state->inspace[i] = (float *) _mm_malloc(sizeof(float) * fftlen, 16)) == NULL )
 #else
 		if ( (state->inspace[i] = (float *) calloc(sizeof(float), fftlen)) == NULL )
 #endif
 			goto error;
-#ifdef USE_FFTW
+#if defined(USE_FFTW) || defined(__APPLE__)
         memset( state->inspace[i], 0, sizeof(float) * fftlen );
 #endif
 	}
@@ -249,6 +296,9 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
             goto error;
     }
     if ( (state->p_bw = fftwf_plan_dft_c2r_1d(fftlen, state->f_out, state->revspace, FFTW_ESTIMATE)) == NULL )
+        goto error;
+#elif defined(__APPLE__)
+    if ( (state->setup = vDSP_create_fftsetup( state->fftlenlog2, FFT_RADIX2 )) == NULL )
         goto error;
 #else
 	if ( (state->cfg_fw = kiss_fftr_alloc( fftlen, 0, NULL, NULL )) == NULL )
@@ -271,9 +321,6 @@ void convolver_restage( void * state_, const float * const * impulse )
 {
 	convolver_state * state = (convolver_state *) state_;
 
-#ifdef USE_FFTW
-#endif
-
 	float * impulse_temp;
 
 	int impulse_count;
@@ -285,6 +332,10 @@ void convolver_restage( void * state_, const float * const * impulse )
 #ifdef USE_FFTW
     fftwf_plan p;
     fftwf_complex ** f_ir = state->f_ir;
+#elif defined(__APPLE__)
+    int log2n = state->fftlenlog2;
+    FFTSetup setup = state->setup;
+    DSPSplitComplex * f_ir = state->f_ir;
 #else
 	kiss_fftr_cfg cfg_fw = state->cfg_fw;
 	kiss_fft_cpx ** f_ir = state->f_ir;
@@ -325,6 +376,9 @@ void convolver_restage( void * state_, const float * const * impulse )
                 fftwf_execute(p);
                 fftwf_destroy_plan(p);
             }
+#elif defined(__APPLE__)
+            vDSP_ctoz((DSPComplex*)impulse_temp, 2, &f_ir[i * channels_per_impulse + j], 1, fftlen / 2);
+            vDSP_fft_zrip(setup, &f_ir[i * channels_per_impulse + j], 1, log2n, FFT_FORWARD);
 #else
 			kiss_fftr( cfg_fw, impulse_temp, f_ir[i * channels_per_impulse + j] );
 #endif
@@ -363,6 +417,9 @@ void convolver_delete( void * state_ )
         }
         if ( state->p_bw )
             fftwf_destroy_plan( state->p_bw );
+#elif defined(__APPLE__)
+        if ( state->setup )
+            vDSP_destroy_fftsetup( state->setup );
 #else
 		if ( state->cfg_fw )
 			kiss_fftr_free( state->cfg_fw );
@@ -373,30 +430,44 @@ void convolver_delete( void * state_ )
 		{
 			for (i = 0; i < total_channels; ++i)
 			{
+#if !defined(USE_FFTW) && defined(__APPLE__)
+                _free_dspsplitcomplex( &state->f_ir[i] );
+#else
 				if ( state->f_ir[i] )
 #ifdef USE_FFTW
                     fftwf_free( state->f_ir[i] );
 #else
 					KISS_FFT_FREE( state->f_ir[i] );
 #endif
+#endif
 			}
 			free( state->f_ir );
 		}
+#if !defined(USE_FFTW) && defined(__APPLE__)
+        _free_dspsplitcomplex( &state->f_out );
+#else
 		if ( state->f_out )
 #ifdef USE_FFTW
             fftwf_free( state->f_out );
 #else
 			KISS_FFT_FREE( state->f_out );
 #endif
+#endif
+#if !defined(USE_FFTW) && defined(__APPLE__)
+        _free_dspsplitcomplex( &state->f_in );
+#else
 		if ( state->f_in )
 #ifdef USE_FFTW
             fftwf_free( state->f_out );
 #else
 			KISS_FFT_FREE( state->f_in );
 #endif
+#endif
 		if ( state->revspace )
 #ifdef USE_FFTW
             fftwf_free( state->revspace );
+#elif defined(__APPLE__)
+            _mm_free( state->revspace );
 #else
 			KISS_FFT_FREE( state->revspace );
 #endif
@@ -407,6 +478,8 @@ void convolver_delete( void * state_ )
 				if ( state->outspace[i] )
 #ifdef USE_FFTW
                     fftwf_free( state->outspace[i] );
+#elif defined(__APPLE__)
+                    _mm_free( state->outspace[i] );
 #else
 					free( state->outspace[i] );
 #endif
@@ -420,6 +493,8 @@ void convolver_delete( void * state_ )
 				if ( state->inspace[i] )
 #ifdef USE_FFTW
                     fftwf_free( state->inspace[i] );
+#elif defined(__APPLE__)
+                    _mm_free( state->inspace[i] );
 #else
 					free( state->inspace[i] );
 #endif
@@ -504,11 +579,21 @@ void convolver_write(void * state_, const float * input_samples)
 #ifdef USE_FFTW
             fftwf_complex *f_in = state->f_in;
             fftwf_complex *f_out = state->f_out;
+#elif defined(__APPLE__)
+            DSPSplitComplex *f_in = &state->f_in;
+            DSPSplitComplex *f_out = &state->f_out;
+            FFTSetup setup = state->setup;
+            int log2n = state->fftlenlog2;
+            float scale;
 #else
 			kiss_fft_cpx *f_in = state->f_in;
 			kiss_fft_cpx *f_out = state->f_out;
 #endif
 			float *revspace = state->revspace;
+
+#if !defined(USE_FFTW) && defined(__APPLE__)
+            fftlen = state->fftlen;
+#endif
 
             if ( state->mode == 0 || state->mode == 1 )
             {
@@ -517,11 +602,40 @@ void convolver_write(void * state_, const float * input_samples)
 				    int index = i * state->mode;
 #ifdef USE_FFTW
                     fftwf_complex *f_ir = state->f_ir[index];
+#elif defined(__APPLE__)
+                    DSPSplitComplex *f_ir = &state->f_ir[index];
+                    float preserveIRNyq;
+                    float preserveSigNyq;
 #else
     				kiss_fft_cpx *f_ir = state->f_ir[index];
 #endif
 	    			float *outspace;
 
+#if !defined(USE_FFTW) && defined(__APPLE__)
+                    vDSP_ctoz((DSPComplex*)(state->inspace[i]), 2, f_in, 1, fftlen / 2);
+
+                    vDSP_fft_zrip(setup, f_in, 1, log2n, FFT_FORWARD);
+
+                    preserveIRNyq = f_ir->imagp[0];
+                    f_ir->imagp[0] = 0;
+                    preserveSigNyq = f_in->imagp[0];
+                    f_in->imagp[0] = 0;
+
+                    vDSP_zvmul(f_in, 1, f_ir, 1, f_out, 1, fftlen / 2, 1);
+
+                    f_out->imagp[0] = preserveIRNyq * preserveSigNyq;
+                    f_ir->imagp[0] = preserveIRNyq;
+
+                    vDSP_fft_zrip(setup, f_out, 1, log2n, FFT_INVERSE);
+
+                    vDSP_ztoc(f_out, 1, (DSPComplex*)revspace, 2, fftlen / 2);
+
+                    scale = 1.0 / (4.0 * (float)fftlen);
+                    vDSP_vsmul(revspace, 1, &scale, revspace, 1, fftlen);
+
+                    outspace = state->outspace[i];
+                    vDSP_vadd(revspace, 1, outspace, 1, outspace, 1, fftlen);
+#else
 #ifdef USE_FFTW
                     fftwf_execute( state->p_fw[i] );
 #else
@@ -552,6 +666,7 @@ void convolver_write(void * state_, const float * input_samples)
 		    		outspace = state->outspace[i];
 			    	for (j = 0, fftlen = state->fftlen, fftlen_if = 1.0f / (float)fftlen; j < fftlen; ++j)
 				    	outspace[j] += revspace[j] * fftlen_if;
+#endif
                 }
             }
             else if ( state->mode == 2 )
@@ -563,6 +678,16 @@ void convolver_write(void * state_, const float * input_samples)
              
 #ifdef USE_FFTW
                     fftwf_execute( state->p_fw[i] );
+#elif defined(__APPLE__)
+                    float preserveIRNyq;
+                    float preserveSigNyq;
+
+                    vDSP_ctoz((DSPComplex*)(state->inspace[i]), 2, f_in, 1, fftlen / 2);
+
+                    vDSP_fft_zrip(setup, f_in, 1, log2n, FFT_FORWARD);
+
+                    preserveSigNyq = f_in->imagp[0];
+                    f_in->imagp[0] = 0;
 #else
 		    		kiss_fftr( state->cfg_fw, state->inspace[i], f_in );
 #endif
@@ -575,11 +700,23 @@ void convolver_write(void * state_, const float * input_samples)
 					    int index = i * output_channels + j;
 #ifdef USE_FFTW
                         fftwf_complex *f_ir = state->f_ir[index];
+#elif defined(__APPLE__)
+                        DSPSplitComplex *f_ir = &state->f_ir[index];
+                        float scale;
 #else
     					kiss_fft_cpx *f_ir = state->f_ir[index];
 #endif
 	    				float *outspace;
 
+#if !defined(USE_FFTW) && defined(__APPLE__)
+                        preserveIRNyq = f_ir->imagp[0];
+                        f_ir->imagp[0] = 0;
+
+                        vDSP_zvmul(f_in, 1, f_ir, 1, f_out, 1, fftlen / 2, 1);
+
+                        f_ir->imagp[0] = preserveIRNyq;
+                        f_out->imagp[0] = preserveIRNyq * preserveSigNyq;
+#else
 		    			for ( k = 0, fftlen = state->fftlen / 2 + 1; k < fftlen; ++k )
 			    		{
 #ifdef USE_FFTW
@@ -594,11 +731,15 @@ void convolver_write(void * state_, const float * input_samples)
     						f_out[k].i = im;
 #endif
 	    				}
+#endif
 
             /* Then we transform back from frequency to time domain. */
 
 #ifdef USE_FFTW
                         fftwf_execute( state->p_bw );
+#elif defined(__APPLE__)
+                        vDSP_fft_zrip(setup, f_out, 1, log2n, FFT_INVERSE);
+                        vDSP_ztoc(f_out, 1, (DSPComplex*)revspace, 2, fftlen / 2);
 #else
 		    			kiss_fftri( state->cfg_bw, f_out, revspace );
 #endif
@@ -607,9 +748,17 @@ void convolver_write(void * state_, const float * input_samples)
              * each value by the total number of samples in the buffer. Remember,
              * since there is some overlap, this addition step is important. */
 
+#if !defined(USE_FFTW) && defined(__APPLE__)
+                        scale = 1.0 / (4.0*(float)fftlen);
+                        vDSP_vsmul(revspace, 1, &scale, revspace, 1, fftlen);
+
+                        outspace = state->outspace[j];
+                        vDSP_vadd(revspace, 1, outspace, 1, outspace, 1, fftlen);
+#else
 			    		outspace = state->outspace[j];
 				    	for (k = 0, fftlen = state->fftlen, fftlen_if = 1.0f / (float)fftlen; k < fftlen; ++k)
 					    	outspace[k] += revspace[k] * fftlen_if;
+#endif
 		    		}
                 }
 			}
