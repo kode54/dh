@@ -101,6 +101,15 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
     else if ( mode == 2 )
 	    total_channels = input_channels * output_channels;
 
+#ifdef USE_FFTW
+    fftlen = ( impulse_size * 11 ) / 8;
+	{
+		// round up to a power of two
+		int pow = 1;
+		while ( fftlen > 2 ) { pow++; fftlen /= 2; }
+		fftlen = 2 << pow;
+	}
+#else
     /* This is bog standard, from the example code I lifted. Mainly needs this
      * calculation for varying impulse sizes */
 
@@ -153,6 +162,7 @@ void * convolver_create(const float * const* impulse, int impulse_size, int inpu
 
 		fftlen = current;
 	}
+#endif
 
 	state->fftlen = fftlen;
 	state->stepsize = fftlen - impulse_size - 10;
