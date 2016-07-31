@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 
 #define _countof(d) (sizeof((d))/sizeof(((d)[0])))
 
@@ -17,6 +18,14 @@ static const int impulse_wav_size = 524332;
 unsigned int get_le32(const unsigned char * ptr)
 {
 	return ptr[0] + (ptr[1] << 8) + (ptr[2] << 16) + (ptr[3] << 24);
+}
+
+void set_le32(unsigned char * ptr, unsigned int in)
+{
+	ptr[0] = (in & 0xFF);
+	ptr[1] = (in >> 8) & 0xFF;
+	ptr[2] = (in >> 16) & 0xFF;
+	ptr[3] = (in >> 24) & 0xFF;
 }
 
 unsigned int get_be32(const unsigned char * ptr)
@@ -62,6 +71,44 @@ int find_data(const unsigned char * buffer, unsigned int size, int * data_offset
 		size -= size_ + 8;
 	} while (size > 0);
 	return -1;
+}
+
+int write_data(unsigned char * buffer, unsigned int size, unsigned int data_offset, unsigned int data_size, int * out_size)
+{
+	unsigned char * ptr = buffer;
+	unsigned int tag;
+	unsigned int size_;
+	if (size < 8) return -1;
+	tag = get_be32(ptr);
+	if (tag != 'RIFF') return -1;
+	size_ = get_le32(ptr + 4);
+	if (size_ + 8 > size) return -1;
+	size = size_;
+	ptr += 8;
+	*out_size = 8;
+	if (size < 4) return -1;
+	tag = get_be32(ptr);
+	if (tag != 'WAVE') return -1;
+	size -= 4;
+	ptr += 4;
+	*out_size += 4;
+	do {
+		tag = get_be32(ptr);
+		size_ = get_le32(ptr + 4);
+		if (size_ + 8 > size) return -1;
+		if (tag == 'data') {
+			memmove(ptr + 8, ptr + 8 + data_offset * 8, data_size * 8);
+			set_le32(ptr + 4, data_size * 8);
+			memmove(ptr + 8 + data_size * 8, ptr + 8 + size_, size - size_ + 8);
+			size_ = data_size * 8;
+		}
+		if (size_ & 1) size_ += 1;
+		ptr += size_ + 8;
+		size -= size_ + 8;
+		*out_size += size_ + 8;
+	} while (size > 0);
+	set_le32(buffer + 4, *out_size - 8);
+	return 0;
 }
 
 int signum(float value)
@@ -148,6 +195,15 @@ int main(void)
 			}
 
 			sample_counts[frequency] = max_sample - min_sample + 1;
+
+			for (speaker = 0; speaker < speaker_count; ++speaker)
+			{
+				sprintf(name, "samples/trimmed/sample_%u_%s_dh%u.wav", frequencies[frequency], speakers[speaker], level);
+				write_data(buffer[speaker], impulse_wav_size, min_sample, max_sample - min_sample + 1, &data_size);
+				f = fopen(name, "wb");
+				fwrite(buffer[speaker], data_size, 1, f);
+				fclose(f);
+			}
 
 			for (speaker = 0; speaker < speaker_count; ++speaker)
 			{
