@@ -52,14 +52,14 @@ extern "C" {
  * - 2: multiple multi-channel impulses, one impulse per input channel,
  *      containing one channel per output channel, and the results are
  *      summed together. */
-void * convolver_create(const float * const* impulses, int impulse_size, int input_channels, int output_channels, int mode);
+void *convolver_create(const float *const *impulses, int impulse_size, int input_channels, int output_channels, int mode);
 
 /* This function is for re-importing a modified impulse set into an existing
  * instance, with the same number of channels per input and output, so the
  * same number of impulses and channels per impulse. Useful if you are
  * creating filter impulses, and wish to restage with a newly generated filter
  * set. */
-void convolver_restage(void *, const float * const* impulses);
+void convolver_restage(void *, const float *const *impulses);
 
 /* Pass an instance of the convolver here to clean up when you're done with it */
 void convolver_delete(void *);
@@ -68,20 +68,8 @@ void convolver_delete(void *);
  * restarting a stream with the same filter parameters. */
 void convolver_clear(void *);
 
-/* This returns the number of samples necessary for the convolver to generate
- * a block of output. When there is output buffered, it is a bad idea to fill
- * more input samples in. */
-int convolver_get_free_count(void *);
-
-/* Write the samples here, one n-channel set at a time. */
-void convolver_write(void *, const float *);
-
-/* This will return how many samples are buffered for output. */
-int convolver_ready(void *);
-
-/* This will return one n-channel set of samples at a time, or else silence
- * if the buffer is empty. */
-void convolver_read(void *, float *);
+/* This will process N samples, in blocks of up to 512. */
+void convolver_run(void *, const float *input, float *output, int count);
 
 #ifdef __cplusplus
 }
