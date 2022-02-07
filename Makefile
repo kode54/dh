@@ -46,5 +46,4 @@ dh2.o : dh2.c samples.h
 	$(CC) -c $(CFLAGS) -o $@ $*.c
 
 clean:
-	rm -f $(DH2_OBJS) $(ST_OBJS) $(CONV_OBJS) dh2 sample_trim samples.h > /dev/null
-
+	rm -f $(DH2_OBJS) $(ST_OBJS) $(CONV_OBJS) dh2 sample_trim samples.h samples/trimmed/*.wav > /dev/null
