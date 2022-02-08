@@ -49,6 +49,18 @@
 #include "kissfft/kiss_fftr.h"
 #endif
 
+#ifdef __APPLE__
+#define _mm_malloc(a, b) _memalign_malloc(a, b)
+static void *_memalign_malloc(size_t size, size_t align) {
+	void *ret = NULL;
+	if(posix_memalign(&ret, align, size) != 0) {
+		return NULL;
+	}
+	return ret;
+}
+#define _mm_free(a) free(a)
+#endif
+
 #if !defined(USE_FFTW) && defined(__APPLE__)
 static inline int _malloc_dspsplitcomplex(DSPSplitComplex *out, size_t fftlen) {
 	fftlen = (fftlen / 2) + 1;
